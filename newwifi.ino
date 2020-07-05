@@ -164,6 +164,7 @@ void sendPacket(uint8_t type) {
 /*---------------------------------------------------------------------*/
 void sendDeauth(int iNum) {
   for (int i = 0; i < maxSTAs; i++) {
+    if (varMode != MODE_DEAUTHER) return;
     if (i >= iapc[iNum]) return;
     //-------------------------------------------------------------------
     macCpy(stMac, istMac[iNum][i]);
@@ -280,14 +281,14 @@ void loop() {
       break;
     //==============================================================
     case MODE_DEAUTHER:
+      displayMSG = "Attacking......";
       webServer.handleClient();
       dnsServer.processNextRequest();
       sendDeauth(iap);
-      displayMSG = "Attacking......";
       break;
     //==============================================================
     default:
-      Serial.println("varMode = " + varMode);
+      //Serial.println("varMode = " + varMode);
       delay(300);
       break;
   }
